@@ -2,17 +2,36 @@ provider "aws" {
   region = "ap-south-1"
 }
 
-# ECR
+# -------------------- ECR --------------------
 resource "aws_ecr_repository" "web_app_repo" {
   name = "static-web-app-repo"
 }
 
-# ECS Cluster
+# ---------------- ECS Cluster ----------------
 resource "aws_ecs_cluster" "web_app_cluster" {
   name = "static-web-app-cluster"
 }
 
-# Load Balancer
+# ---------------- Security Group Rules ----------------
+resource "aws_security_group_rule" "allow_https" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = "sg-0ea8212f0856ff058"
+}
+
+resource "aws_security_group_rule" "allow_http" {
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = "sg-0ea8212f0856ff058"
+}
+
+# ---------------- Load Balancer ----------------
 resource "aws_lb" "web_app_lb" {
   name               = "web-app-lb"
   internal           = false
@@ -21,7 +40,7 @@ resource "aws_lb" "web_app_lb" {
   subnets            = ["subnet-0fcc7d7a34648475b", "subnet-050c56435de4e4513"]
 }
 
-# Target Group
+# ---------------- Target Group ----------------
 resource "aws_lb_target_group" "web_app_tg" {
   name        = "web-app-tg"
   port        = 80
@@ -39,7 +58,24 @@ resource "aws_lb_target_group" "web_app_tg" {
   }
 }
 
-# HTTPS Listener with ACM
+# ---------------- HTTP Redirect Listener (80) ----------------
+resource "aws_lb_listener" "http_redirect_listener" {
+  load_balancer_arn = aws_lb.web_app_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+# ---------------- HTTPS Listener (443) ----------------
 resource "aws_lb_listener" "https_listener" {
   load_balancer_arn = aws_lb.web_app_lb.arn
   port              = 443
@@ -53,13 +89,37 @@ resource "aws_lb_listener" "https_listener" {
   }
 }
 
-# ECS Task
+# ---------------- IAM Roles ----------------
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecsTaskExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# ---------------- ECS Task Definition ----------------
 resource "aws_ecs_task_definition" "web_app_task" {
   family                   = "static-web-app-task"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
   container_definitions = jsonencode([{
     name      = "web-container"
@@ -71,7 +131,7 @@ resource "aws_ecs_task_definition" "web_app_task" {
   }])
 }
 
-# ECS Service
+# ---------------- ECS Service ----------------
 resource "aws_ecs_service" "web_app_service" {
   name            = "static-web-app-service"
   cluster         = aws_ecs_cluster.web_app_cluster.id
@@ -94,7 +154,7 @@ resource "aws_ecs_service" "web_app_service" {
   depends_on = [aws_lb_listener.https_listener]
 }
 
-# Route 53 Record: app.nosmoking.sbs => ECS Load Balancer
+# ---------------- Route 53 Record ----------------
 resource "aws_route53_record" "ecs_lb_dns" {
   zone_id = "Z0613656MPUJP2OYYPEL"
   name    = "app.nosmoking.sbs"
@@ -105,4 +165,11 @@ resource "aws_route53_record" "ecs_lb_dns" {
     zone_id                = aws_lb.web_app_lb.zone_id
     evaluate_target_health = true
   }
+
+  depends_on = [aws_lb.web_app_lb]
+}
+
+# ---------------- Output ----------------
+output "load_balancer_dns" {
+  value = aws_lb.web_app_lb.dns_name
 }
